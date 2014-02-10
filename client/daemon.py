@@ -54,5 +54,4 @@ def saveWeather(device, temperature, pressure, humidity, batteryVoltage):
 
 
 if __name__ == '__main__':
-#    listenPort()
-    parse('1|t:26.3,p:741,h:27.7,bv:4.49')
+    listenPort()
