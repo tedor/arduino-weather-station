@@ -4,10 +4,10 @@
 #include <sdelay.h>
 #include <math.h>
 
-const int deviceNumber = 1;           // info about device number
-const int sleepTime = 300000;         // sleep time - 5 min
-const bool debug = false;             // enable/disable debug mode
-const uint64_t pipe = 0xF0A1B2C3D1LL; // pipe number for transmitter
+const int deviceNumber = 1;             // info about device number
+const unsigned long sleepTime = 300000; // sleep time - 5 min
+const bool debug = false;               // enable/disable debug mode
+const uint64_t pipe = 0xF0A1B2C3D1LL;   // pipe number for transmitter
 
 // NRF24 init
 #include <RF24.h>
@@ -70,9 +70,6 @@ void setup() {
 }
 
 void loop() {
-  // Wake up
-  radio.powerUp();
-
   // Init vars
   char temperatureString[8] = "";
   char* temperatureNegativeString = "";
@@ -100,6 +97,9 @@ void loop() {
   // Create send string
   sprintf(sendData, "%i|t:%s%s,p:%s,h:%s,bv:%s", deviceNumber, temperatureNegativeString, temperatureString, pressureString, humidityString, batteryVoltageString);
 
+  // Wake up
+  radio.powerUp();
+  
   // Send data string
   bool sendOk = radio.write(&sendData, strlen(sendData));
   if(debug) {
