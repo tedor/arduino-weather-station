@@ -1,6 +1,8 @@
 from serial import Serial
 import config
 import psycopg2
+import requests
+import json
 
 def listenPort():
     ser = Serial(port=config.serialPort, baudrate=config.serialBaudrate, timeout=1)
@@ -14,6 +16,7 @@ def listenPort():
 def parse(line):
     device, listParams = line.split("|")
 
+    print line
     if device == '1':
         parseWeather(device, listParams)
 
@@ -31,6 +34,12 @@ def parseWeather(device, listParams):
             batteryVoltage = paramValue
 
     saveWeather(device, temperature, pressure, humidity, batteryVoltage)
+    postApiWeather(device, temperature, pressure, humidity, batteryVoltage)
+
+def postApiWeather(device, temperature, pressure, humidity, batteryVoltage):
+    if config.apiRequest:
+        payload = {'device_id': device, 'temperature': temperature, 'pressure': pressure, 'humidity': humidity, 'battery_voltage': batteryVoltage}
+        requests.post(config.apiRequest, auth=(config.apiUser, config.apiPassword), data=json.dumps(payload), headers={'content-type': 'application/json'}, verify=False)
 
 def saveWeather(device, temperature, pressure, humidity, batteryVoltage):
     try:
