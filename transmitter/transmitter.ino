@@ -4,18 +4,22 @@
 #include <sdelay.h>
 #include <math.h>
 
-const int deviceNumber = 1;             // info about device number
-const unsigned long sleepTime = 300000; // sleep time - 5 min
-const bool debug = false;               // enable/disable debug mode
-const uint64_t pipe = 0xF0A1B2C3D1LL;   // pipe number for transmitter
+#define WAKING_UP_TIME 65
+#define SERVER_ADDRESS 10              // server address number
+#define CLIENT_ADDRESS 20              // client address number
+#define SLEEP_TIME 288995              // sleep time - 5 min
+const bool debug = false;              // enable/disable debug mode
+const int sensorPowerPin = A1;         // sensors off/on power pin
+const int radioPowerPin = 8;           // radio on/off power pinu
 
-// NRF24 init
-#include <RF24.h>
-#include <nRF24L01.h>
-#include "printf.h"
-#define NRF24_CE 8
-#define NRF24_CS 9
-RF24 radio(NRF24_CE, NRF24_CS);
+uint8_t checkCode[] = "your_checksum";
+
+// SI4432 initu
+#include <RF22Datagram.h>
+#include <RF22.h>
+#include <SPI.h>
+RF22Datagram rf22(CLIENT_ADDRESS);
+uint8_t receivedData[32];
 
 // BMP085 init
 #include <Wire.h>
@@ -23,53 +27,50 @@ RF24 radio(NRF24_CE, NRF24_CS);
 Adafruit_BMP085 bmp;
 
 // DHT22 init
-#include "DHT.h"
+#include <dht.h>
 #define DHTPIN 7
 #define DHTTYPE DHT22
-DHT dht(DHTPIN, DHTTYPE);
+dht DHT;
 
 // Conv to mmHg
 const float convMmHgCoef = 0.0075;
 
-// Votage define
-const long InternalReferenceVoltage = 1062;
+void(* resetFunc) (void) = 0;
 
 void setup() {
   if(debug) {
     Serial.begin(9600);  
+    Serial.println("setup");
+    delay(10);
   }
 
-  // Init DHT22 device
-  dht.begin();
+  // Init voltage read
+  getBandgap();
+}
+
+void loop() {
+  // Power on sensors and sleep with power down mode
+  pinMode(sensorPowerPin, OUTPUT);
+  digitalWrite(sensorPowerPin, HIGH);
+
+  // Sleep 2s for prepare DTH sensor 
+  sleepWithWDT(WDTO_2S);
 
   // Init BMP085 device
   bmp.begin();
 
-  // Init voltage read
-  getBandgap();
-
-  // Init nRF24 radio device
-  if(debug) {
-    printf_begin(); 
-  }
-  radio.begin();
-  radio.setDataRate(RF24_250KBPS);
-  radio.setPALevel(RF24_PA_MAX);
-  radio.setChannel(67);  
-  radio.setAutoAck(1);
-  radio.enableDynamicPayloads();
-  radio.setRetries(15, 15);
-  radio.setCRCLength(RF24_CRC_16);
-  radio.openWritingPipe(pipe);
-  radio.powerUp();  
-  if(debug) {
-    radio.printDetails();
+  // Read DHT sensor
+  int repeat = 5;
+  while (repeat) {
+    int chk = DHT.read22(DHTPIN);
+    if (chk == DHTLIB_OK) {
+      repeat = 0;
+    } else {
+      repeat--;
+      delay(100);
+    }
   }
 
-  delay(2000);
-}
-
-void loop() {
   // Init vars
   char temperatureString[8] = "";
   char* temperatureNegativeString = "";
@@ -80,14 +81,15 @@ void loop() {
 
   // Read data
   int pressure = round(bmp.readPressure() * convMmHgCoef);
-  float temperature = dht.readTemperature();
-  float humidity = dht.readHumidity();
+  float temperature = DHT.temperature;  
+  float humidity = DHT.humidity;
   float batteryVoltage = getBandgap();
   
   if(temperature < 0) {
     temperature = -temperature;
     temperatureNegativeString = "-";
   }
+
   // Conver values to string
   dtostrf(temperature, 3, 1, temperatureString);  
   itoa(pressure, pressureString, 10);
@@ -95,36 +97,114 @@ void loop() {
   dtostrf(batteryVoltage, 3, 2, batteryVoltageString);
 
   // Create send string
-  sprintf(sendData, "%i|t:%s%s,p:%s,h:%s,bv:%s", deviceNumber, temperatureNegativeString, temperatureString, pressureString, humidityString, batteryVoltageString);
+  sprintf(sendData, "%i|t:%s%s,p:%s,h:%s,bv:%s", CLIENT_ADDRESS, temperatureNegativeString, temperatureString, pressureString, humidityString, batteryVoltageString);
 
-  // Wake up
-  radio.powerUp();
-  
-  // Send data string
-  bool sendOk = radio.write(&sendData, strlen(sendData));
-  if(debug) {
-    if (sendOk) {
-      Serial.println("Send - ok");
-    } else {
-      Serial.println("Send - failed");
-    }
-
+  if (debug) {
     Serial.println(sendData);
     delay(100);
   }
 
+  // Wake up radio module
+  pinMode(radioPowerPin, OUTPUT);
+  digitalWrite(radioPowerPin, 1);
+
+  // Init SI4432 radio device
+  if (!rf22.init() && debug) {
+    Serial.println("RF22 init failed");
+  }
+
+  rf22.setModemConfig(RF22::GFSK_Rb2Fd5);
+  rf22.setTxPower(RF22_TXPOW_11DBM);
+
+  int i = 5;
+
+  while(i--) {
+    rf22.sendto(checkCode, sizeof(checkCode), SERVER_ADDRESS);
+    rf22.waitPacketSent(500);
+    delay(1);
+
+    rf22.sendto((uint8_t*) sendData, sizeof(sendData), SERVER_ADDRESS);
+    rf22.waitPacketSent(500);
+    delay(1);
+
+    if (rf22.waitAvailableTimeout(500)) {
+      // Should be a message for us now  
+      if (debug) {
+        Serial.println("Transmit - done");
+      }
+      uint8_t len = sizeof(receivedData);
+      if (rf22.recv(receivedData, &len)) {
+        if (strcmp((char*)receivedData, "OK") == 0) {
+          i = 0;
+        }
+      } 
+    } else {
+      if (debug) {
+        Serial.println("Transmit - retry");
+      }
+      delay(200);
+    }
+  }
+  
+  // Radio model power off 
+  digitalWrite(radioPowerPin, LOW);
+
+  // Sensors power off
+  digitalWrite(sensorPowerPin, LOW);
+
+  if (debug) {
+    Serial.println("sleep");
+    delay(100);
+  }
+
   // Sleep
-  radio.powerDown();
-  sdelay(sleepTime);
+  sleepNow();
 }
 
-float getBandgap () {
-  // REFS0 : Selects AVcc external reference
-  // MUX3 MUX2 MUX1 : Selects 1.1V (VBG) 
-   ADMUX = _BV (REFS0) | _BV (MUX3) | _BV (MUX2) | _BV (MUX1);
-   ADCSRA |= _BV( ADSC );  // start conversion
-   while (ADCSRA & _BV (ADSC)){}  // wait for conversion to complete
-   float results = (((InternalReferenceVoltage * 1024) / ADC) + 5) / 10;
-   results = results / 100;
-   return results;
+void sleepNow()
+{
+  // Power off si4432 module 
+  digitalWrite(10, HIGH);
+  pinMode(13, INPUT); 
+
+  // Power off dht22 module
+  pinMode(DHTPIN, INPUT); 
+  digitalWrite(DHTPIN, HIGH);
+
+  // Power off bmp085 module
+  pinMode(A4, INPUT);
+  pinMode(A5, INPUT);
+
+  // Radio model power off 
+  digitalWrite(radioPowerPin, LOW);
+
+  // Sensors power off
+  digitalWrite(sensorPowerPin, LOW);
+
+  // disable ADC
+  ADCSRA = 0;  
+
+  unsigned long sleepPeriod = SLEEP_TIME;
+
+  while (sleepPeriod >= 8192 + WAKING_UP_TIME) { 
+    sleepWithWDT(WDTO_8S);   
+    sleepPeriod -= 8192 + WAKING_UP_TIME; 
+  }
+}
+
+float getBandgap () 
+{
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+ 
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Start conversion
+  while (bit_is_set(ADCSRA,ADSC)); // measuring
+ 
+  uint8_t low  = ADCL; // must read ADCL first - it then locks ADCH  
+  uint8_t high = ADCH; // unlocks both
+ 
+  float data = (high<<8) | low;
+ 
+  float result = 1125300 / data / 1000;
+  return result; // Vcc in volts
 } 
